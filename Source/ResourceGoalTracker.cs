@@ -122,9 +122,11 @@ namespace ResourceGoalTracker
         static class ResourceReadout_ResourceReadoutOnGUI_Patch
         {
             static readonly MethodInfo DrawIconMethod = AccessTools.Method(typeof(ResourceReadout), "DrawIcon");
+            static float lastDrawnHeight;
+            static Vector2 scrollPosition;
 
             [HarmonyPostfix]
-            static void GoalResourceReadout(ResourceReadout __instance) {
+            static void ResourceGoalReadout(ResourceReadout __instance) {
                 if (Event.current.type == EventType.layout) return;
                 if (Current.ProgramState != ProgramState.Playing) return;
                 if (Find.MainTabsRoot.OpenTab == MainButtonDefOf.Menu) return;
@@ -132,23 +134,47 @@ namespace ResourceGoalTracker
                 GenUI.DrawTextWinterShadow(new Rect(256f, 512f, -256f, -512f)); // copied from ResourceReadout, not sure exactly
                 Text.Font = GameFont.Small;
 
-                const float iconAndLabelWidth = 80f;
-                var readoutRect = new Rect(7f + 130f, 7f, iconAndLabelWidth * goal.resourceAmounts.Count, 50f);
-                GUI.BeginGroup(readoutRect);
-                Text.Anchor = TextAnchor.MiddleLeft;
-                var x = 0f;
-                foreach (var displayAmount in goal.resourceAmounts.Where(displayAmount => displayAmount.Value > 0)) {
-                    const float iconSpace = 34f;
-                    const float height = 24f; // what DoReadoutSimple() uses, I'm not sure why
-                    var iconRect = new Rect(x, 0f, iconSpace, height);
-                    DrawIconMethod.Invoke(__instance, new object[] {iconRect.x, iconRect.y, displayAmount.Key});
-                    var labelRect = new Rect(iconRect.x + iconSpace, iconRect.y + 2f, iconAndLabelWidth - iconSpace, height);
-                    Widgets.Label(labelRect, displayAmount.Value.ToStringCached());
-                    x += iconAndLabelWidth;
+                var readoutRect = new Rect(120f + 7f, 7f, 110f, UI.screenHeight - 7 - 200f);
+                var viewRect = new Rect(0f, 0f, readoutRect.width, lastDrawnHeight);
+                var needScroll = viewRect.height > readoutRect.height;
+                if (needScroll) {
+                    Widgets.BeginScrollView(readoutRect, ref scrollPosition, viewRect, false);
+                } else {
+                    scrollPosition = Vector2.zero;
+                    GUI.BeginGroup(readoutRect);
                 }
 
+                GUI.BeginGroup(viewRect);
+                Text.Anchor = TextAnchor.MiddleLeft;
+                DrawResource(__instance, readoutRect, out lastDrawnHeight);
                 Text.Anchor = TextAnchor.UpperLeft;
                 GUI.EndGroup();
+
+                if (needScroll)
+                    Widgets.EndScrollView();
+                else
+                    GUI.EndGroup();
+            }
+
+            static void DrawResource(ResourceReadout __instance, Rect readoutRect, out float drawHeight) {
+                drawHeight = 0f;
+                foreach (var amount in goal.resourceAmounts) {
+                    if (amount.Value <= 0) continue;
+                    var iconRect = new Rect(0f, drawHeight, 999f, 24f);
+                    if (iconRect.yMax >= scrollPosition.y && iconRect.y <= scrollPosition.y + readoutRect.height) {
+                        DrawIconMethod.Invoke(__instance, new object[] {iconRect.x, iconRect.y, amount.Key});
+                        iconRect.y += 2f;
+                        var labelRect = new Rect(34f, iconRect.y, iconRect.width - 34f, iconRect.height);
+                        Widgets.Label(labelRect, amount.Value.ToStringCached());
+                    }
+
+                    drawHeight += 24f;
+
+                    if (Event.current.type == EventType.MouseUp && Event.current.button == 1 && Mouse.IsOver(new Rect(iconRect.x, iconRect.y, 50f, 24f))) {
+                        Event.current.Use();
+                        Find.WindowStack.Add(Goal.FloatMenu(amount.Key));
+                    }
+                }
             }
         }
     }
