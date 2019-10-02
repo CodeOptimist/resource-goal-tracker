@@ -7,6 +7,7 @@ using HugsLib;
 using RimWorld;
 using UnityEngine;
 using Verse;
+
 //using HugsLib.Settings;
 
 namespace ResourceGoalTracker
@@ -28,18 +29,31 @@ namespace ResourceGoalTracker
         class Goal
         {
             static readonly Dictionary<ThingDef, List<ThingDefCountClass>> thingDefIngredientCounts = new Dictionary<ThingDef, List<ThingDefCountClass>>();
-            public readonly Dictionary<ThingDef, int> parts;
+            Action CustomCounterTick;
+            Dictionary<ThingDef, int> parts;
             public Dictionary<ThingDef, int> resourceAmounts;
 
             public Goal(Dictionary<ThingDef, int> parts) {
-                this.parts = parts;
-                UpdateThingDefIngredientCounts(parts);
+                UpdateParts(parts, null, true);
+            }
+
+            void UpdateParts(Dictionary<ThingDef, int> newParts, Action customCounterTick = null, bool updateThingDefIngredientCounts = false) {
+                parts = newParts;
+                CustomCounterTick = customCounterTick;
+                if (updateThingDefIngredientCounts)
+                    UpdateThingDefIngredientCounts(newParts);
+            }
+
+            public void CounterTick() {
+                CustomCounterTick?.Invoke();
+                UpdateResourceAmounts();
             }
 
             static void UpdateThingDefIngredientCounts(Dictionary<ThingDef, int> parts) {
                 foreach (var part in parts)
                 foreach (var cost in part.Key.costList) {
                     // todo use FirstOrDefault, make right clicking product allow changing recipe to create it
+                    if (thingDefIngredientCounts.ContainsKey(cost.thingDef)) continue;
                     var recipe = DefDatabase<RecipeDef>.AllDefs.SingleOrDefault(r => r.products.Any(tc => tc.thingDef == cost.thingDef));
                     if (recipe == null) continue;
                     var ingredientCounts = new List<ThingDefCountClass>();
@@ -106,6 +120,38 @@ namespace ResourceGoalTracker
 
                 return result;
             }
+
+            public static FloatMenu FloatMenu(ThingDef iconThingDef) {
+                var options = new List<FloatMenuOption>();
+
+                var reactorOnly = new FloatMenuOption($"1 {ThingDefOf.Ship_Reactor.label}", () => { goal.UpdateParts(new Dictionary<ThingDef, int> {{ThingDefOf.Ship_Reactor, 1}}); });
+                options.Add(reactorOnly);
+
+                var shipParts = new Dictionary<ThingDef, int>(ShipUtility.RequiredParts());
+                var casketCount = shipParts.TryGetValue(ThingDefOf.Ship_CryptosleepCasket);
+                var label = casketCount > 0 ? $"ship minimum ({casketCount} {ThingDefOf.Ship_CryptosleepCasket.label})" : "ship";
+                var shipMinColonists = new FloatMenuOption(label, () => { goal.UpdateParts(shipParts); });
+                options.Add(shipMinColonists);
+
+                if (casketCount > 0) {
+                    label = $"ship for map colonists ({Find.CurrentMap.mapPawns.FreeColonistsCount} {ThingDefOf.Ship_CryptosleepCasket.label})";
+                    var shipMapColonists = new FloatMenuOption(
+                        label, () => { goal.UpdateParts(shipParts, () => { goal.parts[ThingDefOf.Ship_CryptosleepCasket] = Find.CurrentMap.mapPawns.FreeColonistsCount; }); });
+                    options.Add(shipMapColonists);
+
+                    var allColonistsCount = PawnsFinder.AllMapsCaravansAndTravelingTransportPods_Alive_FreeColonists.Count();
+                    label = $"ship for all colonists ({allColonistsCount} {ThingDefOf.Ship_CryptosleepCasket.label})";
+                    var shipAllColonists = new FloatMenuOption(
+                        label,
+                        () => {
+                            goal.UpdateParts(shipParts, () => { goal.parts[ThingDefOf.Ship_CryptosleepCasket] = PawnsFinder.AllMapsCaravansAndTravelingTransportPods_Alive_FreeColonists.Count(); });
+                        });
+                    options.Add(shipAllColonists);
+                }
+
+                var result = new FloatMenu(options);
+                return result;
+            }
         }
 
         [HarmonyPatch(typeof(ResourceCounter), nameof(ResourceCounter.ResourceCounterTick))]
@@ -113,8 +159,7 @@ namespace ResourceGoalTracker
         {
             [HarmonyPostfix]
             static void CounterTick() {
-                //goal.parts[ThingDefOf.Ship_CryptosleepCasket] = Find.CurrentMap.mapPawns.FreeColonistsSpawnedCount;
-                goal.UpdateResourceAmounts();
+                goal.CounterTick();
             }
         }
 
