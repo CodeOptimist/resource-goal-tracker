@@ -7,6 +7,7 @@ using HugsLib;
 using RimWorld;
 using RimWorld.Planet;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 using Verse;
 
 //using HugsLib.Settings;
@@ -22,13 +23,17 @@ namespace ResourceGoalTracker
             //SettingHandle<T> GetSettingHandle<T>(string settingName, T defaultValue) {
             //    return Settings.GetHandle(settingName, $"CORGT_{settingName}Setting_title".Translate(), $"CORGT_{settingName}Setting_description".Translate(), defaultValue);
             //}
+        }
 
-            curGoal = Goal.Presets.reactorOnly;
+        public override void SceneLoaded(Scene scene) {
+            if (GenScene.InPlayScene)
+                curGoal = new Goal(); // blank for loading
         }
 
         class ResourceSettings : WorldComponent
         {
             static Dictionary<ThingDef, RecipeDef> thingsRecipes = new Dictionary<ThingDef, RecipeDef>();
+            bool foundInSaveFile;
 
             public ResourceSettings(World world) : base(world) {
             }
@@ -42,21 +47,57 @@ namespace ResourceGoalTracker
                 return recipe;
             }
 
+            public override void FinalizeInit() {
+                if (!foundInSaveFile)
+                    curGoal = Goal.presets["shipMinColonists"];
+            }
+
             public override void ExposeData() {
+                foundInSaveFile = true;
                 Scribe_Collections.Look(ref thingsRecipes, "recipes", LookMode.Def, LookMode.Def);
 
-                if (Scribe.mode == LoadSaveMode.PostLoadInit)
+                string preset = null;
+                if (Scribe.mode == LoadSaveMode.Saving)
+                    preset = Goal.presets.Where(x => x.Value == curGoal).Select(x => x.Key).SingleOrDefault();
+                Scribe_Values.Look(ref preset, "usePreset");
+                var writingUnusedExampleForUser = Scribe.mode == LoadSaveMode.Saving && curGoal.parts.Count > 0; // they can delete <usePreset> and it will kick-in
+                if (preset == null || writingUnusedExampleForUser)
+                    Scribe_Collections.Look(ref curGoal.parts, "goal", LookMode.Def, LookMode.Value);
+
+                if (Scribe.mode == LoadSaveMode.PostLoadInit) {
                     if (thingsRecipes == null)
                         thingsRecipes = new Dictionary<ThingDef, RecipeDef>();
+                    if (preset != null)
+                        curGoal = Goal.presets.TryGetValue(preset, curGoal);
+                    if (curGoal.parts == null || curGoal.parts.Count == 0)
+                        curGoal = Goal.presets["shipMinColonists"];
+                }
             }
         }
 
         class Goal
         {
             static readonly Dictionary<RecipeDef, List<ThingDefCountClass>> recipesIngredientCounts = new Dictionary<RecipeDef, List<ThingDefCountClass>>();
+
+            public static readonly Dictionary<string, Goal> presets = new Dictionary<string, Goal> {
+                {"reactorOnly", new Goal(new Dictionary<ThingDef, int> {{ThingDefOf.Ship_Reactor, 1}})},
+                {"shipMinColonists", new Goal(new Dictionary<ThingDef, int>(ShipUtility.RequiredParts()))}, {
+                    "shipMapColonists", new Goal(
+                        new Dictionary<ThingDef, int>(ShipUtility.RequiredParts()),
+                        goal => { goal.parts[ThingDefOf.Ship_CryptosleepCasket] = Find.CurrentMap.mapPawns.FreeColonistsCount; })
+                }, {
+                    "shipAllColonists", new Goal(
+                        new Dictionary<ThingDef, int>(ShipUtility.RequiredParts()),
+                        goal => { goal.parts[ThingDefOf.Ship_CryptosleepCasket] = PawnsFinder.AllMapsCaravansAndTravelingTransportPods_Alive_FreeColonists.Count(); })
+                },
+            };
+
             readonly Action<Goal> CustomCounterTick;
-            readonly Dictionary<ThingDef, int> parts;
+            public Dictionary<ThingDef, int> parts = new Dictionary<ThingDef, int>(); // for loading
             public Dictionary<ThingDef, int> resourceAmounts;
+
+            public Goal() {
+            }
 
             Goal(Dictionary<ThingDef, int> parts, Action<Goal> customCounterTick = null) {
                 this.parts = parts;
@@ -157,32 +198,18 @@ namespace ResourceGoalTracker
                         });
                 }
 
-                result.Add(GoalFloatMenuOption(Presets.reactorOnly, $"1 {ThingDefOf.Ship_Reactor.label}"));
+                result.Add(GoalFloatMenuOption(presets["reactorOnly"], $"1 {ThingDefOf.Ship_Reactor.label}"));
 
-                var casketCount = Presets.shipMinColonists.parts.TryGetValue(ThingDefOf.Ship_CryptosleepCasket);
-                result.Add(GoalFloatMenuOption(Presets.shipMinColonists, casketCount > 0 ? $"ship minimum ({casketCount} {ThingDefOf.Ship_CryptosleepCasket.label})" : "ship"));
+                var casketCount = presets["shipMinColonists"].parts.TryGetValue(ThingDefOf.Ship_CryptosleepCasket);
+                result.Add(GoalFloatMenuOption(presets["shipMinColonists"], casketCount > 0 ? $"ship minimum ({casketCount} {ThingDefOf.Ship_CryptosleepCasket.label})" : "ship"));
 
                 if (casketCount > 0) {
-                    result.Add(GoalFloatMenuOption(Presets.shipMapColonists, $"ship for map colonists ({Find.CurrentMap.mapPawns.FreeColonistsCount} {ThingDefOf.Ship_CryptosleepCasket.label})"));
+                    result.Add(GoalFloatMenuOption(presets["shipMapColonists"], $"ship for map colonists ({Find.CurrentMap.mapPawns.FreeColonistsCount} {ThingDefOf.Ship_CryptosleepCasket.label})"));
                     var allColonistsCount = PawnsFinder.AllMapsCaravansAndTravelingTransportPods_Alive_FreeColonists.Count();
-                    result.Add(GoalFloatMenuOption(Presets.shipAllColonists, $"ship for all colonists ({allColonistsCount} {ThingDefOf.Ship_CryptosleepCasket.label})"));
+                    result.Add(GoalFloatMenuOption(presets["shipAllColonists"], $"ship for all colonists ({allColonistsCount} {ThingDefOf.Ship_CryptosleepCasket.label})"));
                 }
 
                 return result;
-            }
-
-            public static class Presets
-            {
-                public static readonly Goal reactorOnly = new Goal(new Dictionary<ThingDef, int> {{ThingDefOf.Ship_Reactor, 1}});
-                public static readonly Goal shipMinColonists = new Goal(new Dictionary<ThingDef, int>(ShipUtility.RequiredParts()));
-
-                public static readonly Goal shipMapColonists = new Goal(
-                    new Dictionary<ThingDef, int>(ShipUtility.RequiredParts()),
-                    goal => { goal.parts[ThingDefOf.Ship_CryptosleepCasket] = Find.CurrentMap.mapPawns.FreeColonistsCount; });
-
-                public static readonly Goal shipAllColonists = new Goal(
-                    new Dictionary<ThingDef, int>(ShipUtility.RequiredParts()),
-                    goal => { goal.parts[ThingDefOf.Ship_CryptosleepCasket] = PawnsFinder.AllMapsCaravansAndTravelingTransportPods_Alive_FreeColonists.Count(); });
             }
         }
 
@@ -207,6 +234,7 @@ namespace ResourceGoalTracker
                 if (Event.current.type == EventType.layout) return;
                 if (Current.ProgramState != ProgramState.Playing) return;
                 if (Find.MainTabsRoot.OpenTab == MainButtonDefOf.Menu) return;
+                if (curGoal.resourceAmounts == null) return;
 
                 GenUI.DrawTextWinterShadow(new Rect(256f, 512f, -256f, -512f)); // copied from ResourceReadout, not sure exactly
                 Text.Font = GameFont.Small;
@@ -244,7 +272,6 @@ namespace ResourceGoalTracker
                         var labelRect = new Rect(34f, iconRect.y, iconRect.width - 34f, iconRect.height);
                         Widgets.Label(labelRect, amount.Value.ToStringCached());
                     }
-
                     drawHeight += 24f;
 
                     if (Event.current.type == EventType.MouseUp && Event.current.button == 1 && Mouse.IsOver(new Rect(iconRect.x, iconRect.y, 100f, 24f))) {
