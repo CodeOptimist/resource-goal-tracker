@@ -9,6 +9,7 @@ using RimWorld.Planet;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using Verse;
+using Debug = System.Diagnostics.Debug;
 
 //using HugsLib.Settings;
 
@@ -33,7 +34,6 @@ namespace ResourceGoalTracker
         class ResourceSettings : WorldComponent
         {
             static Dictionary<ThingDef, RecipeDef> thingsRecipes = new Dictionary<ThingDef, RecipeDef>();
-            bool foundInSaveFile;
 
             public ResourceSettings(World world) : base(world) {
             }
@@ -48,30 +48,34 @@ namespace ResourceGoalTracker
             }
 
             public override void FinalizeInit() {
-                if (!foundInSaveFile)
+                // handles missing data from ExposeData()
+                // also ExposeData() not being called (no WorldComponent in save yet)
+                // also neither ExposeData() nor SceneLoaded() being called (creating a new game)
+                if (curGoal?.neededParts == null || curGoal.neededParts.Count == 0)
                     curGoal = Goal.presets["shipMinColonists"];
             }
 
             public override void ExposeData() {
-                foundInSaveFile = true;
+                string preset = null;
+                if (Scribe.mode == LoadSaveMode.LoadingVars) {
+                    Scribe_Values.Look(ref preset, "usePreset");
+                    if (preset == null)
+                        Scribe_Collections.Look(ref curGoal.neededParts, "goal", LookMode.Def, LookMode.Value);
+                    else
+                        curGoal = Goal.presets.TryGetValue(preset, curGoal);
+                } else if (Scribe.mode == LoadSaveMode.Saving) {
+                    preset = Goal.presets.Where(x => x.Value == curGoal).Select(x => x.Key).SingleOrDefault();
+                    Scribe_Values.Look(ref preset, "usePreset");
+                    // write even when we're using a preset as an editable example
+                    if (curGoal.neededParts.Count > 0)
+                        Scribe_Collections.Look(ref curGoal.neededParts, "goal", LookMode.Def, LookMode.Value);
+                }
+
                 Scribe_Collections.Look(ref thingsRecipes, "recipes", LookMode.Def, LookMode.Def);
 
-                string preset = null;
-                if (Scribe.mode == LoadSaveMode.Saving)
-                    preset = Goal.presets.Where(x => x.Value == curGoal).Select(x => x.Key).SingleOrDefault();
-                Scribe_Values.Look(ref preset, "usePreset");
-                var writingUnusedExampleForUser = Scribe.mode == LoadSaveMode.Saving && curGoal.parts.Count > 0; // they can delete <usePreset> and it will kick-in
-                if (preset == null || writingUnusedExampleForUser)
-                    Scribe_Collections.Look(ref curGoal.parts, "goal", LookMode.Def, LookMode.Value);
-
-                if (Scribe.mode == LoadSaveMode.PostLoadInit) {
+                if (Scribe.mode == LoadSaveMode.PostLoadInit)
                     if (thingsRecipes == null)
                         thingsRecipes = new Dictionary<ThingDef, RecipeDef>();
-                    if (preset != null)
-                        curGoal = Goal.presets.TryGetValue(preset, curGoal);
-                    if (curGoal.parts == null || curGoal.parts.Count == 0)
-                        curGoal = Goal.presets["shipMinColonists"];
-                }
             }
         }
 
@@ -84,23 +88,23 @@ namespace ResourceGoalTracker
                 {"shipMinColonists", new Goal(new Dictionary<ThingDef, int>(ShipUtility.RequiredParts()))}, {
                     "shipMapColonists", new Goal(
                         new Dictionary<ThingDef, int>(ShipUtility.RequiredParts()),
-                        goal => { goal.parts[ThingDefOf.Ship_CryptosleepCasket] = Find.CurrentMap.mapPawns.FreeColonistsCount; })
+                        goal => { goal.neededParts[ThingDefOf.Ship_CryptosleepCasket] = Find.CurrentMap.mapPawns.FreeColonistsCount; })
                 }, {
                     "shipAllColonists", new Goal(
                         new Dictionary<ThingDef, int>(ShipUtility.RequiredParts()),
-                        goal => { goal.parts[ThingDefOf.Ship_CryptosleepCasket] = PawnsFinder.AllMapsCaravansAndTravelingTransportPods_Alive_FreeColonists.Count(); })
+                        goal => { goal.neededParts[ThingDefOf.Ship_CryptosleepCasket] = PawnsFinder.AllMapsCaravansAndTravelingTransportPods_Alive_FreeColonists.Count(); })
                 },
             };
 
             readonly Action<Goal> CustomCounterTick;
-            public Dictionary<ThingDef, int> parts = new Dictionary<ThingDef, int>(); // for loading
+            public Dictionary<ThingDef, int> neededParts = new Dictionary<ThingDef, int>(); // for loading
             public Dictionary<ThingDef, int> resourceAmounts;
 
             public Goal() {
             }
 
-            Goal(Dictionary<ThingDef, int> parts, Action<Goal> customCounterTick = null) {
-                this.parts = parts;
+            Goal(Dictionary<ThingDef, int> neededParts, Action<Goal> customCounterTick = null) {
+                this.neededParts = neededParts;
                 CustomCounterTick = customCounterTick;
             }
 
@@ -121,46 +125,63 @@ namespace ResourceGoalTracker
 
             public void CounterTick() {
                 CustomCounterTick?.Invoke(curGoal);
-                UpdateResourceAmounts();
+                UpdateAmounts();
             }
 
             // todo? live update from trade menu pre-confirm
-            void UpdateResourceAmounts() {
-                var countedParts = CountAll(Find.CurrentMap, parts.Keys, false, true);
-                var remainingParts = new Dictionary<ThingDef, int>();
-                foreach (var part in parts)
-                    remainingParts[part.Key] = Math.Max(part.Value - countedParts.TryGetValue(part.Key), 0);
+            void UpdateAmounts() {
+                var foundParts = CountAll(Find.CurrentMap, neededParts.Keys, null, false, true);
+                var missingParts = new Dictionary<ThingDef, int>();
+                foreach (var neededPart in neededParts)
+                    missingParts[neededPart.Key] = Math.Max(neededPart.Value - foundParts.TryGetValue(neededPart.Key), 0);
 
-                var costs = new Dictionary<ThingDef, int>();
-                foreach (var part in remainingParts)
-                foreach (var cost in part.Key.costList)
-                    costs[cost.thingDef] = costs.TryGetValue(cost.thingDef) + part.Value * cost.count;
+                var neededShallowResources = new Dictionary<ThingDef, int>();
+                foreach (var missingPart in missingParts)
+                foreach (var neededShallowResource in missingPart.Key.costList) // of just missing parts
+                    neededShallowResources[neededShallowResource.thingDef] = neededShallowResources.TryGetValue(neededShallowResource.thingDef) + missingPart.Value * neededShallowResource.count;
 
-                // base on costs so we have ALL keys
-                var deepCosts = new Dictionary<ThingDef, int>(costs);
-                foreach (var cost in costs) {
-                    var ingredientCounts = IngredientCountsFor(ResourceSettings.RecipeFor(cost.Key));
+                var lookedInFrames = missingParts.Where(x => x.Value > 0).Select(x => x.Key.frameDef).ToList();
+                var foundShallowResources = CountAll(Find.CurrentMap, neededShallowResources.Keys, lookedInFrames, false, false);
+
+                // base on neededShallowResources so we have ALL keys together
+                var neededResources = new Dictionary<ThingDef, int>(neededShallowResources);
+                foreach (var neededShallowResource in neededShallowResources) {
+                    var ingredientCounts = IngredientCountsFor(ResourceSettings.RecipeFor(neededShallowResource.Key));
                     if (ingredientCounts == null) continue;
-                    // deep counts of only remaining things
-                    var costCount = Math.Max(cost.Value - Find.CurrentMap.resourceCounter.GetCount(cost.Key), 0);
-                    foreach (var ingredientCount in ingredientCounts)
-                        deepCosts[ingredientCount.thingDef] = costs.TryGetValue(ingredientCount.thingDef) + costCount * ingredientCount.count;
+                    var missingShallowResourceCount = Math.Max(neededShallowResource.Value - foundShallowResources[neededShallowResource.Key], 0);
+                    foreach (var ingredientCount in ingredientCounts)  // of just missing shallow resources
+                        neededResources[ingredientCount.thingDef] = neededShallowResources.TryGetValue(ingredientCount.thingDef) + missingShallowResourceCount * ingredientCount.count;
                 }
 
-                var remainingCosts = deepCosts.ToDictionary(cost => cost.Key, cost => Math.Max(cost.Value - Find.CurrentMap.resourceCounter.GetCount(cost.Key), 0));
-                resourceAmounts = remainingCosts;
+                var newDefsFromIngredients = neededResources.Keys.Except(neededShallowResources.Keys);
+                var foundDeepResources = CountAll(Find.CurrentMap, newDefsFromIngredients, lookedInFrames, false, false);
+                var foundResources = foundShallowResources.Concat(foundDeepResources).ToDictionary(x => x.Key, x => x.Value);
+                var missingResources = neededResources.ToDictionary(cost => cost.Key, cost => Math.Max(cost.Value - foundResources[cost.Key], 0));
+                resourceAmounts = missingResources;
+
+                //Debug.WriteLine($"Needed parts: {neededParts.ToStringFullContents()}");
+                //Debug.WriteLine($"Found parts: {foundParts.ToStringFullContents()}");
+                //Debug.WriteLine($"Missing parts: {missingParts.ToStringFullContents()}");
+                //Debug.WriteLine($"Included frame containers: {lookedInFrames.ToStringSafeEnumerable()}");
+                //Debug.WriteLine($"Needed shallow resources: {neededShallowResources.ToStringFullContents()}");
+                //Debug.WriteLine($"Needed resources: {neededResources.ToStringFullContents()}");
+                //Debug.WriteLine($"Found resources: {foundResources.ToStringFullContents()}");
+                //Debug.WriteLine($"Missing resources: {missingResources.ToStringFullContents()}");
             }
 
-            static Dictionary<ThingDef, int> CountAll(Map map, IEnumerable<ThingDef> thingDefs, bool includeEquipped, bool includeBuildings) {
+            static Dictionary<ThingDef, int> CountAll(Map map, IEnumerable<ThingDef> thingDefs, List<ThingDef> lookedInFrames, bool includeEquipped, bool includeBuildings) {
                 var result = new Dictionary<ThingDef, int>();
                 foreach (var thingDef in thingDefs) {
-                    int asResourceCount = 0, count = 0, minifiedCount = 0, equippedCount = 0, wornCount = 0, directlyHeldCount = 0;
-                    if (thingDef.CountAsResource) {
+                    int asResourceCount = 0, count = 0, minifiedCount = 0, framedCount = 0, equippedCount = 0, wornCount = 0, directlyHeldCount = 0;
+                    if (lookedInFrames == null && thingDef.CountAsResource) {
                         asResourceCount = map.resourceCounter.GetCount(thingDef);
                     } else {
                         count = map.listerThings.ThingsOfDef(thingDef).Where(x => includeBuildings || !(x is Building)).Sum(x => x.stackCount);
                         minifiedCount = map.listerThings.ThingsInGroup(ThingRequestGroup.MinifiedThing).Cast<MinifiedThing>().Where(x => x.InnerThing.def == thingDef)
                             .Select(x => x.stackCount * x.InnerThing.stackCount).Sum();
+                        if (lookedInFrames != null)
+                            framedCount = map.listerThings.ThingsInGroup(ThingRequestGroup.BuildingFrame).Cast<Frame>().Where(x => lookedInFrames.Contains(x.def))
+                                .Sum(x => x.stackCount * x.resourceContainer.TotalStackCountOfDef(thingDef));
                     }
 
                     var carriedCount = map.mapPawns.FreeColonistsSpawned.Where(x => x.carryTracker.CarriedThing?.def == thingDef).Select(x => x.carryTracker.CarriedThing)
@@ -172,7 +193,7 @@ namespace ResourceGoalTracker
                         directlyHeldCount = map.mapPawns.FreeColonistsSpawned.SelectMany(x => x.inventory.GetDirectlyHeldThings()).Where(x => x.def == thingDef).Sum(x => x.stackCount);
                     }
 
-                    var totalCount = asResourceCount + count + minifiedCount + carriedCount + equippedCount + wornCount + directlyHeldCount;
+                    var totalCount = asResourceCount + count + minifiedCount + framedCount + carriedCount + equippedCount + wornCount + directlyHeldCount;
                     result.Add(thingDef, totalCount);
                 }
 
@@ -182,7 +203,7 @@ namespace ResourceGoalTracker
             public static FloatMenu FloatMenu(ThingDef iconThingDef) {
                 var options = MainFloatMenu();
 
-                //todo list and choose recipe per thingdef
+                //todo list and choose recipe per thingdef, draw icons & quantities in float menu options of recipe
                 var result = new FloatMenu(options);
                 return result;
             }
@@ -200,7 +221,7 @@ namespace ResourceGoalTracker
 
                 result.Add(GoalFloatMenuOption(presets["reactorOnly"], $"1 {ThingDefOf.Ship_Reactor.label}"));
 
-                var casketCount = presets["shipMinColonists"].parts.TryGetValue(ThingDefOf.Ship_CryptosleepCasket);
+                var casketCount = presets["shipMinColonists"].neededParts.TryGetValue(ThingDefOf.Ship_CryptosleepCasket);
                 result.Add(GoalFloatMenuOption(presets["shipMinColonists"], casketCount > 0 ? $"ship minimum ({casketCount} {ThingDefOf.Ship_CryptosleepCasket.label})" : "ship"));
 
                 if (casketCount > 0) {
@@ -272,6 +293,7 @@ namespace ResourceGoalTracker
                         var labelRect = new Rect(34f, iconRect.y, iconRect.width - 34f, iconRect.height);
                         Widgets.Label(labelRect, amount.Value.ToStringCached());
                     }
+
                     drawHeight += 24f;
 
                     if (Event.current.type == EventType.MouseUp && Event.current.button == 1 && Mouse.IsOver(new Rect(iconRect.x, iconRect.y, 100f, 24f))) {
