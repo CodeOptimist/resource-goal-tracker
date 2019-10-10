@@ -260,7 +260,7 @@ namespace ResourceGoalTracker
                 GenUI.DrawTextWinterShadow(new Rect(256f, 512f, -256f, -512f)); // copied from ResourceReadout, not sure exactly
                 Text.Font = GameFont.Small;
 
-                var readoutRect = new Rect(120f + 7f, 7f, 110f, UI.screenHeight - 7 - 200f);
+                var readoutRect = new Rect(120f + 7f, 48f + 7f, 110f, UI.screenHeight - 7 - 200f);
                 var viewRect = new Rect(0f, 0f, readoutRect.width, lastDrawnHeight);
                 var needScroll = viewRect.height > readoutRect.height;
                 if (needScroll) {
@@ -272,6 +272,13 @@ namespace ResourceGoalTracker
 
                 GUI.BeginGroup(viewRect);
                 Text.Anchor = TextAnchor.MiddleLeft;
+                var labelRect = new Rect(0f, 0f, 999f, 24f);
+                Widgets.Label(labelRect, "Goal Tracker");
+                if (Event.current.type == EventType.MouseUp && Event.current.button == 1 && Mouse.IsOver(labelRect))
+                {
+                    Event.current.Use();
+                    Find.WindowStack.Add(Goal.FloatMenu(null));
+                }
                 DrawResource(__instance, readoutRect, out lastDrawnHeight);
                 Text.Anchor = TextAnchor.UpperLeft;
                 GUI.EndGroup();
@@ -283,10 +290,11 @@ namespace ResourceGoalTracker
             }
 
             static void DrawResource(ResourceReadout __instance, Rect readoutRect, out float drawHeight) {
-                drawHeight = 0f;
+                drawHeight = 24f;
                 foreach (var amount in curGoal.resourceAmounts) {
                     if (amount.Value <= 0) continue;
                     var iconRect = new Rect(0f, drawHeight, 999f, 24f);
+                    if (Messages.CollidesWithAnyMessage(readoutRect, out var messageAlpha)) continue;
                     if (iconRect.yMax >= scrollPosition.y && iconRect.y <= scrollPosition.y + readoutRect.height) {
                         DrawIconMethod.Invoke(__instance, new object[] {iconRect.x, iconRect.y, amount.Key});
                         iconRect.y += 2f;
